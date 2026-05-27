@@ -1,91 +1,229 @@
-# VedaAI Backend
+# VedaAI — Assessment Creator (Backend)
 
-API for the VedaAI Assessment Creator — Express + TypeScript, MongoDB, Redis, BullMQ,
-Socket.IO, and Google Gemini. See [`PLAN.md`](./PLAN.md) for the full architecture & roadmap.
+REST + realtime API for **VedaAI**, an AI-assisted assessment creator for teachers. A teacher
+describes an assignment (subject, question types, marks, an optional reference document), and the
+service generates a complete, structured **question paper with an answer key** — asynchronously,
+with live progress — and can export it to **PDF**.
 
-> The server **boots without a database** during early development. Endpoints that need
-> Mongo/Redis report their status via `/api/health`; configure the stores when you're ready.
+- **Frontend (live):** https://veda-ai-frontend-five.vercel.app
+- **Frontend repo:** https://github.com/Aditya-twd/veda-ai-frontend
+- **Architecture deep-dive:** [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+- **User manual:** [`USER_MANUAL.md`](./USER_MANUAL.md)
+- **Deployment guide:** [`DEPLOY.md`](./DEPLOY.md)
 
-## Requirements
-- Node.js 20+ (tested on 24)
-- Docker (for local MongoDB + Redis) — optional until you wire up the DB
+---
 
-## Setup
+## Highlights
+
+- **Asynchronous generation** — paper generation runs as a background job (BullMQ on Redis), so the
+  API stays responsive and a slow model call never blocks the request thread.
+- **Live progress over WebSockets** — clients subscribe to an assignment and receive
+  `started → progress → completed/failed` events in real time (Socket.IO).
+- **Multimodal input** — an uploaded PDF or image is passed directly to the model, so papers can be
+  generated *from a teacher's own material*.
+- **Structured, validated output** — the model is constrained to JSON and every response is parsed
+  and validated with Zod before it touches the database; malformed output is regenerated.
+- **Never-fail UX** — if the generation provider is unavailable (quota, outage, bad key), the job
+  falls back to a clearly-marked sample paper instead of erroring.
+- **Google Sign-In + JWT auth**, with a one-click **guest** fallback so the app is never locked out.
+- **PDF export** with proper Unicode (math symbols, ₹, Greek) via bundled fonts.
+- **Boots without infrastructure** — the server starts even before MongoDB/Redis are configured and
+  reports each subsystem on `/api/health`, which keeps local development and deployment friction low.
+
+## Tech stack
+
+| Concern | Choice |
+|---|---|
+| Runtime / language | Node.js 24, TypeScript |
+| Web framework | Express |
+| Database | MongoDB + Mongoose |
+| Cache / queue broker | Redis (ioredis) |
+| Background jobs | BullMQ |
+| Realtime | Socket.IO (+ Redis pub/sub bridge across processes) |
+| AI generation | Google Gemini (`@google/genai`, multimodal) |
+| Validation | Zod |
+| Auth | Google ID-token verification (`google-auth-library`) → app-issued JWT |
+| Uploads | Multer (disk storage) |
+| PDF | PDFKit (bundled DejaVu fonts) |
+| Packaging | Docker (multi-stage) |
+
+## Architecture at a glance
+
+```
+                              ┌──────────────────────────────┐
+                              │   Web process (Express)       │
+  Client ── HTTPS/WSS ───────▶│  REST API + Socket.IO         │
+  (Next.js frontend)          │  validates, persists, ENQUEUE │
+                              └───────┬───────────────▲───────┘
+                                      │ add job        │ progress events
+                                      ▼                │ (Redis pub/sub)
+                              ┌───────────────┐   ┌────┴───────────────┐
+                              │     Redis     │◀──│  Worker process    │
+                              │  (BullMQ +    │   │  consumes jobs:    │
+                              │   pub/sub)    │──▶│  AI generate → save│
+                              └───────────────┘   └────┬───────────────┘
+                                                       │
+                              ┌───────────────┐        │
+                              │   MongoDB     │◀───────┘
+                              │ users /       │  persists assignment + paper
+                              │ assignments / │
+                              │ questionpapers│
+                              └───────────────┘
+```
+
+The **web** and **worker** are separate processes built from the same image. See
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full request/generation lifecycle, data models, and
+the design decisions behind each choice.
+
+## Project structure
+
+```
+src/
+  app.ts                 # Express app: middleware, route mounting, error handling
+  server.ts              # Web entrypoint: HTTP server + Socket.IO + event bridge
+  worker.ts              # Worker entrypoint: BullMQ consumers
+  seed.ts                # Seeds the demo teacher
+  config/                # env (Zod-validated), db, redis, socket
+  middleware/            # requireAuth (JWT), error handler, multer upload
+  models/                # Mongoose models: User, Assignment, QuestionPaper
+  modules/
+    auth/                # Google sign-in, guest, profile/onboarding
+    assignment/          # assignment CRUD + "generate" trigger
+    paper/               # fetch/edit papers, regenerate a section, PDF export
+    upload/              # file upload endpoint
+  ai/                    # Gemini client, prompt builders, Zod schema, parser, mock generator
+  queues/                # generation queue, worker, Redis connection, event bridge
+  pdf/                   # PDF rendering service
+  sockets/               # Socket.IO event names + payload types
+  utils/                 # logger, helpers
+assets/fonts/            # DejaVuSans fonts bundled for PDF Unicode
+```
+
+## Getting started
+
+### Prerequisites
+- Node.js 20+ (developed on 24)
+- Docker (for local MongoDB + Redis) — or use hosted MongoDB Atlas + Upstash Redis
+
+### Install & configure
 ```bash
 npm install
-cp .env.example .env      # fill values in as you go
+cp .env.example .env     # then fill in the values (see "Environment" below)
 ```
 
-## Run (development)
+### Run local data stores
 ```bash
-npm run dev        # API + (later) Socket.IO  →  http://localhost:5000
-npm run worker     # BullMQ worker (separate terminal; needs Redis)
-```
-Health check: `GET http://localhost:5000/api/health`
-
-## Data stores (when ready)
-```bash
-docker compose up -d       # starts mongo + redis locally
-# then set in .env:
-#   MONGODB_URI=mongodb://localhost:27017/vedaai
-#   REDIS_URL=redis://localhost:6379
-npm run seed               # creates the demo teacher (John Doe / DPS Bokaro)
+docker compose up -d     # MongoDB on :27017, Redis on :6379
+npm run seed             # create the demo teacher (enables guest login)
 ```
 
-## Authentication (Google Sign-In + JWT)
-
-Users sign in with Google on the frontend; the Google **ID token** is verified here, and we
-issue our **own JWT** (sent back as `Authorization: Bearer <jwt>`). A **"Continue as guest"**
-option logs in as the seeded demo teacher so the app is never blocked.
-
-**Endpoints** (`/api/auth`): `POST /google` (body `{ credential }`), `POST /guest`,
-`GET /me`, `PATCH /me` (onboarding — sets the user's school).
-
-### One-time Google Cloud setup (free, ~3 min)
-1. <https://console.cloud.google.com> → create/select a project.
-2. **APIs & Services → OAuth consent screen** → *External* → fill app name + support email →
-   add your own Google account under **Test users** (while the app is in "Testing").
-3. **APIs & Services → Credentials → Create Credentials → OAuth client ID → Web application**.
-4. Under **Authorized JavaScript origins** add the frontend origin(s) — currently
-   **`http://localhost:3000`** (plus `http://localhost:3001` and your deployed URL as needed).
-   *The GIS ID-token button uses JS origins, not redirect URIs — no redirect URI required.*
-5. Copy the **Client ID** into BOTH:
-   - `backend/.env` → `GOOGLE_CLIENT_ID=...`
-   - `frontend/.env.local` → `NEXT_PUBLIC_GOOGLE_CLIENT_ID=...` (same value)
-6. Set `JWT_SECRET` in `backend/.env` (any long random string; **required in production**).
-
-> If `GOOGLE_CLIENT_ID` is unset the server still boots and guest login works — only the
-> Google button is disabled. Socket.IO is not auth-gated yet (rooms are keyed by assignment id);
-> that's a future hardening step.
-
-## Build / production
+### Run the app (two terminals)
 ```bash
-npm run build              # → dist/
-npm run start              # node dist/server.js  (web)
-npm run start:worker       # node dist/worker.js  (jobs)
+npm run dev              # web API + Socket.IO  → http://localhost:5000
+npm run worker           # BullMQ worker (generation jobs)
+```
+
+Verify: `curl http://localhost:5000/api/health` → all subsystems should read
+`connected`/`configured`.
+
+## Environment
+
+| Variable | Required | Description |
+|---|---|---|
+| `NODE_ENV` | – | `development` \| `production` |
+| `PORT` | – | API port (default `5000`) |
+| `CLIENT_URL` | prod | Allowed CORS / Socket.IO origin(s), comma-separated, **no trailing slash** |
+| `MONGODB_URI` | yes* | MongoDB connection string |
+| `REDIS_URL` | yes* | Redis URL (`redis://` or `rediss://` for TLS) |
+| `GEMINI_API_KEY` | yes* | Google AI Studio key (omit → deterministic mock generator) |
+| `GEMINI_MODEL` | – | Model id (default `gemini-2.5-flash`) |
+| `GOOGLE_CLIENT_ID` | – | OAuth Web client id (omit → Google button disabled, guest still works) |
+| `JWT_SECRET` | prod | Secret for signing JWTs (**required in production**) |
+| `JWT_EXPIRES_IN` | – | Token lifetime (default `7d`) |
+| `MAX_UPLOAD_MB` | – | Max upload size (default `10`) |
+
+\* The server still boots without these (graceful degradation); features that need them are disabled
+and reported on `/api/health`.
+
+## API reference
+
+Base path: `/api`. All responses use the envelope `{ "success": boolean, "data" | "error": ... }`.
+Authenticated routes require `Authorization: Bearer <jwt>`.
+
+### Auth — `/api/auth`
+| Method | Path | Auth | Body | Description |
+|---|---|---|---|---|
+| POST | `/google` | – | `{ credential }` | Verify a Google ID token, return `{ token, user }` |
+| POST | `/guest` | – | – | Log in as the demo teacher, return `{ token, user }` |
+| GET | `/me` | ✓ | – | Current user |
+| PATCH | `/me` | ✓ | `{ school: { name, location?, sector? } }` | Onboarding — set school |
+
+### Assignments — `/api/assignments`
+| Method | Path | Auth | Body / Query | Description |
+|---|---|---|---|---|
+| POST | `/` | ✓ | `{ title, dueDate?, questionTypes[], additionalInstructions?, file? }` | Create a draft |
+| GET | `/` | ✓ | `?q&status&page&limit` | List (filter + paginate) |
+| GET | `/:id` | ✓ | – | Get one (includes `status`) |
+| DELETE | `/:id` | ✓ | – | Delete |
+| POST | `/:id/generate` | ✓ | – | Enqueue generation → `{ assignmentId, jobId, status: "queued" }` |
+
+`questionTypes` items: `{ type: string, numQuestions: number>0, marks: number>0 }`.
+`dueDate` accepts `DD-MM-YYYY` or any Date-parseable string.
+
+### Papers — `/api/papers`
+| Method | Path | Auth | Body | Description |
+|---|---|---|---|---|
+| GET | `/by-assignment/:assignmentId` | ✓ | – | Paper for an assignment |
+| GET | `/:id` | ✓ | – | Get a paper |
+| GET | `/:id/pdf` | ✓ | – | Download as PDF |
+| PATCH | `/:id` | ✓ | full paper body | Save manual edits (recomputes marks, preserves school) |
+| POST | `/:id/sections/:index/regenerate` | ✓ | `{ instruction? }` | Regenerate one section's questions |
+
+### Upload — `/api/upload`
+| Method | Path | Auth | Body | Description |
+|---|---|---|---|---|
+| POST | `/` | ✓ | multipart, field `file` | Upload a PDF/image → returns `{ originalName, mimeType, path, size }` to attach to an assignment |
+
+### Health — `/api/health`
+Returns `{ status, uptime, services: { mongo, redis, gemini }, env }`.
+
+## Realtime events (Socket.IO)
+
+A client emits `subscribe { assignmentId }` to join that assignment's room, then receives:
+
+| Event | Payload |
+|---|---|
+| `generation:started` | `{ assignmentId }` |
+| `generation:progress` | `{ assignmentId, percent, stage }` |
+| `generation:completed` | `{ assignmentId, paperId }` |
+| `generation:failed` | `{ assignmentId, error }` |
+
+`unsubscribe { assignmentId }` leaves the room. Events originate in the worker process and reach
+connected web sockets via a Redis pub/sub bridge (see [`ARCHITECTURE.md`](./ARCHITECTURE.md)).
+
+## Production
+
+Two processes from a single Docker image — **web** (`node dist/server.js`) and **worker**
+(`node dist/worker.js`) — sharing an uploads volume. Full instructions (MongoDB Atlas, Upstash
+Redis, Coolify) are in [`DEPLOY.md`](./DEPLOY.md).
+
+```bash
+npm run build              # compile TS → dist/
+npm run start              # web
+npm run start:worker       # worker
 ```
 
 ## Scripts
-| Script | What it does |
-|---|---|
-| `npm run dev` | API with hot reload (tsx watch) |
-| `npm run worker` | BullMQ worker with hot reload |
-| `npm run build` | Compile TS → `dist/` |
-| `npm run start` / `start:worker` | Run compiled web / worker |
-| `npm run seed` | Seed the demo user (needs DB) |
-| `npm run typecheck` | `tsc --noEmit` |
 
-## Status — build phases (see PLAN.md §11)
-- [x] **Phase 0** — Scaffold: env, config, app/server/worker boot, `/api/health`
-- [x] **Phase 1** — Data layer: Mongoose models (User, Assignment, QuestionPaper), DB/Redis connectors (graceful), seed script
-- [ ] **Phase 2** — Assignment CRUD + validation
-- [ ] **Phase 3** — File upload (multer, PDF/image)
-- [ ] **Phase 4** — Gemini AI core (prompt builder, parser)
-- [ ] **Phase 5** — BullMQ generation queue + worker
-- [ ] **Phase 6** — Socket.IO realtime events
-- [ ] **Phase 7** — PDF export (Puppeteer)
-- [ ] **Phase 8** — Dockerfile + Coolify deploy
-- [x] **Phase 9** — Auth: Google Sign-In → verified ID token → our JWT (Bearer), with guest fallback
-# veda-ai-backend
-# veda-ai-backend
-# veda-ai-backend
+| Script | Description |
+|---|---|
+| `npm run dev` | Web API with hot reload |
+| `npm run worker` | Worker with hot reload |
+| `npm run build` | Compile TypeScript → `dist/` |
+| `npm run start` / `start:worker` | Run compiled web / worker |
+| `npm run seed` | Seed the demo teacher |
+| `npm run typecheck` | Type-check without emitting |
+
+## License
+
+MIT

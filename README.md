@@ -7,9 +7,9 @@ with live progress — and can export it to **PDF**.
 
 - **Frontend (live):** https://veda-ai-frontend-five.vercel.app
 - **Frontend repo:** https://github.com/Aditya-twd/veda-ai-frontend
-- **Architecture deep-dive:** [`ARCHITECTURE.md`](./ARCHITECTURE.md)
-- **User manual:** [`USER_MANUAL.md`](./USER_MANUAL.md)
-- **Deployment guide:** [`DEPLOY.md`](./DEPLOY.md)
+- **Architecture deep-dive:** [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md)
+- **User manual:** [`USER_MANUAL.md`](./docs/USER_MANUAL.md)
+- **Deployment guide:** [`DEPLOY.md`](./docs/DEPLOY.md)
 
 ---
 
@@ -72,7 +72,7 @@ with live progress — and can export it to **PDF**.
 ```
 
 The **web** and **worker** are separate processes built from the same image. See
-[`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full request/generation lifecycle, data models, and
+[`ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full request/generation lifecycle, data models, and
 the design decisions behind each choice.
 
 ## Project structure
@@ -199,13 +199,13 @@ A client emits `subscribe { assignmentId }` to join that assignment's room, then
 | `generation:failed` | `{ assignmentId, error }` |
 
 `unsubscribe { assignmentId }` leaves the room. Events originate in the worker process and reach
-connected web sockets via a Redis pub/sub bridge (see [`ARCHITECTURE.md`](./ARCHITECTURE.md)).
+connected web sockets via a Redis pub/sub bridge (see [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md)).
 
 ## Production
 
 Two processes from a single Docker image — **web** (`node dist/server.js`) and **worker**
 (`node dist/worker.js`) — sharing an uploads volume. Full instructions (MongoDB Atlas, Upstash
-Redis, Coolify) are in [`DEPLOY.md`](./DEPLOY.md).
+Redis, Coolify) are in [`DEPLOY.md`](./docs/DEPLOY.md).
 
 ```bash
 npm run build              # compile TS → dist/

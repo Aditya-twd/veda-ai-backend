@@ -1,10 +1,10 @@
 # VedaAI Backend — Architecture & Build Plan
 
 > **Note:** this is the original planning document, written before implementation. For the
-> as-built design see [`ARCHITECTURE.md`](./ARCHITECTURE.md); for usage see [`README.md`](./README.md).
+> as-built design see [`ARCHITECTURE.md`](./ARCHITECTURE.md); for usage see [`README.md`](../README.md).
 
-> AI Assessment Creator backend. Built to the spec in `../content/projectDetails.txt`.
-> Frontend already lives in `../frontend` (Next.js + Zustand).
+> AI Assessment Creator backend. Built to the spec in `../../content/projectDetails.txt`.
+> Frontend already lives in `../../frontend` (Next.js + Zustand).
 
 ---
 

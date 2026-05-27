@@ -11,8 +11,8 @@ They **share an `uploads` volume** because the web service writes uploaded PDFs/
 disk (multer) and the worker reads them back (`fs.readFile`) to feed Gemini. Data stores are
 **external managed services**: MongoDB Atlas + Upstash Redis.
 
-Files: [`Dockerfile`](./Dockerfile), [`.dockerignore`](./.dockerignore),
-[`docker-compose.coolify.yml`](./docker-compose.coolify.yml).
+Files: [`Dockerfile`](../Dockerfile), [`.dockerignore`](../.dockerignore),
+[`docker-compose.coolify.yml`](../docker-compose.coolify.yml).
 
 > Build note: the image uses **`node:24`** to match the npm version (11.x) that wrote
 > `package-lock.json`. Building on `node:22` (npm 10) fails `npm ci` with a phantom

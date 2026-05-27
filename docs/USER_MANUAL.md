@@ -55,7 +55,7 @@ breaks, ready to print or share.
 ## Part 2 — API walkthrough (technical reviewer)
 
 You can drive the whole flow from the command line. This assumes the backend is running locally with
-MongoDB + Redis configured and the worker running (see [`README.md`](./README.md) → *Getting started*).
+MongoDB + Redis configured and the worker running (see [`README.md`](../README.md) → *Getting started*).
 
 ### 0. Health
 ```bash
@@ -125,5 +125,5 @@ curl -s "http://localhost:5000/api/papers/$PAPER/pdf" \
   -H "Authorization: Bearer $TOKEN" -o paper.pdf
 ```
 
-See [`README.md`](./README.md) for the complete endpoint reference and [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+See [`README.md`](../README.md) for the complete endpoint reference and [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 for how each step works under the hood.

@@ -1,0 +1,57 @@
+# ── VedaAI backend — Coolify deployment (web + BullMQ worker) ───────────────
+# Point a Coolify "Docker Compose" resource at this file. Both services build the
+# same Dockerfile and share the `uploads` volume so the worker can fs.readFile the
+# files the web service received (multer disk storage). Data stores are EXTERNAL:
+# set MONGODB_URI (Atlas) and REDIS_URL (Upstash, rediss://) plus the rest as
+# environment variables in Coolify — they are injected into both services below.
+#
+# In Coolify: assign your domain to the `web` service / port 5000. Traefik handles
+# the WebSocket (Socket.IO) upgrade automatically.
+
+x-shared-env: &shared-env
+  NODE_ENV: production
+  PORT: "5000"
+  CLIENT_URL: ${CLIENT_URL}
+  MONGODB_URI: ${MONGODB_URI}
+  REDIS_URL: ${REDIS_URL}
+  GEMINI_API_KEY: ${GEMINI_API_KEY}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-10}
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment: *shared-env
+    expose:
+      - "5000"
+    volumes:
+      - uploads:/app/uploads
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:5000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    environment: *shared-env
+    volumes:
+      - uploads:/app/uploads
+
+volumes:
+  uploads:

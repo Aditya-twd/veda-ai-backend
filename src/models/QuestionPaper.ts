@@ -47,7 +47,8 @@ const questionPaperSchema = new Schema(
     meta: { type: metaSchema, default: {} },
     sections: { type: [sectionSchema], default: [] },
     answerKey: { type: [answerSchema], default: [] },
-    generatedBy: { type: String, default: "" }, // model id
+    generatedBy: { type: String, default: "" }, // model id (or "mock")
+    isFallback: { type: Boolean, default: false }, // true → sample paper (Gemini was unavailable)
     status: { type: String, enum: ["completed", "failed"], default: "completed" },
   },
   { timestamps: true }

@@ -54,7 +54,7 @@ export function startGenerationWorker(): Worker<GenerationJobData> | null {
         payload: { assignmentId, percent: 50, stage: "Generating questions" },
       });
 
-      const paper = await generatePaper({
+      const { paper, source } = await generatePaper({
         title: assignment.title,
         questionTypes: assignment.questionTypes,
         totalQuestions: assignment.totalQuestions,
@@ -65,10 +65,17 @@ export function startGenerationWorker(): Worker<GenerationJobData> | null {
         file,
       });
 
+      if (source === "fallback") {
+        logger.warn(`assignment ${assignmentId}: used sample-paper fallback (Gemini unavailable)`);
+      }
+
       publishEvent({
         type: "progress",
         payload: { assignmentId, percent: 80, stage: "Saving paper" },
       });
+
+      const generatedBy =
+        source === "gemini" ? process.env.GEMINI_MODEL || "gemini" : "mock";
 
       const saved = await QuestionPaper.create({
         assignmentId: assignment._id,
@@ -76,7 +83,8 @@ export function startGenerationWorker(): Worker<GenerationJobData> | null {
         meta: { ...paper.meta, school },
         sections: paper.sections,
         answerKey: paper.answerKey,
-        generatedBy: process.env.GEMINI_API_KEY ? process.env.GEMINI_MODEL || "gemini" : "mock",
+        generatedBy,
+        isFallback: source === "fallback",
         status: "completed",
       });
 

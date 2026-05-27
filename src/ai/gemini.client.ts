@@ -56,63 +56,83 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
   throw lastErr;
 }
 
+/** Where a generated paper came from — drives `generatedBy` + the UI "sample output" note. */
+export type PaperSource = "gemini" | "mock" | "fallback";
+
+export interface GenerateResult {
+  paper: GeneratedPaper;
+  source: PaperSource;
+}
+
 /**
  * Generate a structured question paper.
- * - No GEMINI_API_KEY  → deterministic mock (full pipeline still works).
- * - Key present        → calls Gemini with structured-JSON output, attaching the
- *                         uploaded PDF/image inline when provided (Gemini is multimodal).
+ * - No GEMINI_API_KEY      → deterministic mock (full pipeline still works).
+ * - Key present            → calls Gemini with structured-JSON output, attaching the
+ *                            uploaded PDF/image inline when provided (Gemini is multimodal).
+ * - Gemini fails entirely  → falls back to the mock (source: "fallback") so generation
+ *                            NEVER hard-fails for the user; the UI surfaces a note.
  */
-export async function generatePaper(input: GenerationInput): Promise<GeneratedPaper> {
+export async function generatePaper(input: GenerationInput): Promise<GenerateResult> {
   if (!env.geminiKey) {
     logger.warn("GEMINI_API_KEY not set — using mock generator.");
-    return mockPaper(input);
+    return { paper: mockPaper(input), source: "mock" };
   }
 
-  const ai = new GoogleGenAI({ apiKey: env.geminiKey });
-  const { systemInstruction, userPrompt } = buildPrompt(input);
+  try {
+    const ai = new GoogleGenAI({ apiKey: env.geminiKey });
+    const { systemInstruction, userPrompt } = buildPrompt(input);
 
-  // Single user turn: text prompt (+ optional inline document/image).
-  const parts: Array<Record<string, unknown>> = [{ text: userPrompt }];
-  if (input.file) {
-    parts.push({
-      inlineData: {
-        mimeType: input.file.mimeType,
-        data: input.file.buffer.toString("base64"),
-      },
-    });
-  }
-
-  const generateOnce = () =>
-    withRetry("generateContent", () =>
-      ai.models.generateContent({
-        model: env.GEMINI_MODEL,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        contents: parts as any,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          temperature: 0.7,
+    // Single user turn: text prompt (+ optional inline document/image).
+    const parts: Array<Record<string, unknown>> = [{ text: userPrompt }];
+    if (input.file) {
+      parts.push({
+        inlineData: {
+          mimeType: input.file.mimeType,
+          data: input.file.buffer.toString("base64"),
         },
-      })
-    );
-
-  // The model occasionally returns JSON that doesn't fit our schema (more likely on
-  // lighter models like flash-lite). Regenerate once before giving up.
-  const MAX_PARSE_ATTEMPTS = 2;
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_PARSE_ATTEMPTS; attempt++) {
-    const response = await generateOnce();
-    try {
-      return parsePaper(response.text ?? "");
-    } catch (err) {
-      lastErr = err;
-      logger.warn(
-        `paper failed parsing/validation (attempt ${attempt}/${MAX_PARSE_ATTEMPTS}) — ` +
-          `${(err as Error).message}${attempt < MAX_PARSE_ATTEMPTS ? "; regenerating" : ""}`
-      );
+      });
     }
+
+    const generateOnce = () =>
+      withRetry("generateContent", () =>
+        ai.models.generateContent({
+          model: env.GEMINI_MODEL,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          contents: parts as any,
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            temperature: 0.7,
+          },
+        })
+      );
+
+    // The model occasionally returns JSON that doesn't fit our schema (more likely on
+    // lighter models like flash-lite). Regenerate once before giving up.
+    const MAX_PARSE_ATTEMPTS = 2;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_PARSE_ATTEMPTS; attempt++) {
+      const response = await generateOnce();
+      try {
+        return { paper: parsePaper(response.text ?? ""), source: "gemini" };
+      } catch (err) {
+        lastErr = err;
+        logger.warn(
+          `paper failed parsing/validation (attempt ${attempt}/${MAX_PARSE_ATTEMPTS}) — ` +
+            `${(err as Error).message}${attempt < MAX_PARSE_ATTEMPTS ? "; regenerating" : ""}`
+        );
+      }
+    }
+    throw lastErr;
+  } catch (err) {
+    // Last resort: rate limit exhausted, outage, revoked key, or unparseable output.
+    // Return a valid sample paper so the user always gets something (clearly marked).
+    logger.error(
+      `Gemini generation failed after all attempts — falling back to a sample paper. ` +
+        `${(err as Error)?.message ?? err}`
+    );
+    return { paper: mockPaper(input), source: "fallback" };
   }
-  throw lastErr;
 }
 
 export interface SectionEditInput {

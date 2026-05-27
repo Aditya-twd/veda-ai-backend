@@ -1,0 +1,17 @@
+# Keep the build context small and secrets out of the image.
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+uploads
+*.log
+.DS_Store
+coverage
+PLAN.md
+README.md
+Dockerfile
+.dockerignore
+docker-compose*.yml

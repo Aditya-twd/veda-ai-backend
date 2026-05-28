@@ -1,7 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { env } from "../config/env";
 import { logger } from "../utils/logger";
-import { ApiError } from "../utils/ApiError";
 import { buildPrompt, buildSectionEditPrompt } from "./prompt.builder";
 import { parsePaper } from "./parser";
 import { mockPaper } from "./mock";
@@ -24,31 +23,43 @@ function statusOf(err: unknown): number | undefined {
 }
 
 /** Honor the server's `retryDelay` hint (sent on 429) if present, else exponential backoff. */
-function backoffMs(err: unknown, attempt: number): number {
+function backoffMs(err: unknown, attempt: number, maxDelayMs = MAX_DELAY_MS): number {
   const hint = (err as { message?: string })?.message?.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-  if (hint) return Math.min((Number(hint[1]) + 1) * 1000, MAX_DELAY_MS);
+  if (hint) return Math.min((Number(hint[1]) + 1) * 1000, maxDelayMs);
   const base = 2000 * 2 ** (attempt - 1); // 2s, 4s, 8s, …
-  return Math.min(base + Math.floor(Math.random() * 500), MAX_DELAY_MS); // + jitter
+  return Math.min(base + Math.floor(Math.random() * 500), maxDelayMs); // + jitter
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Run a Gemini call, retrying transient failures with backoff. */
-async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+interface RetryOpts {
+  maxAttempts?: number;
+  maxDelayMs?: number;
+}
+
+/**
+ * Run a Gemini call, retrying transient failures with backoff.
+ * Background jobs use the generous defaults; interactive calls (the section
+ * editor) pass a small budget so the user isn't left waiting through a 30s
+ * rate-limit backoff.
+ */
+async function withRetry<T>(label: string, fn: () => Promise<T>, opts: RetryOpts = {}): Promise<T> {
+  const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
+  const maxDelayMs = opts.maxDelayMs ?? MAX_DELAY_MS;
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
       const status = statusOf(err);
-      if (attempt === MAX_ATTEMPTS || status === undefined || !RETRYABLE_STATUS.has(status)) {
+      if (attempt === maxAttempts || status === undefined || !RETRYABLE_STATUS.has(status)) {
         throw err;
       }
-      const delay = backoffMs(err, attempt);
+      const delay = backoffMs(err, attempt, maxDelayMs);
       logger.warn(
         `Gemini ${label} failed (HTTP ${status}) — retrying in ${Math.round(delay / 1000)}s ` +
-          `[attempt ${attempt}/${MAX_ATTEMPTS}]`
+          `[attempt ${attempt}/${maxAttempts}]`
       );
       await sleep(delay);
     }
@@ -144,55 +155,71 @@ export interface SectionEditInput {
   instruction: string;
 }
 
+/** Lightly-revised questions — served when no key is set OR Gemini is unavailable. */
+function revisedSectionFallback(input: SectionEditInput): EditQuestion[] {
+  return input.questions.map((q) => ({
+    text: `${q.text} (revised)`,
+    difficulty: "moderate" as const,
+    marks: q.marks,
+    options: q.options ?? [],
+    answer: q.options?.length ? q.options[0] : "Updated sample answer.",
+  }));
+}
+
 /**
  * Regenerate the questions (+ answers) of a single section for the editor.
- * Falls back to a lightly-revised mock when no GEMINI_API_KEY is set.
+ *
+ * This runs synchronously inside the HTTP request (the user is waiting on it),
+ * so unlike full generation it uses a SMALL retry budget — failing fast rather
+ * than honoring a 30s rate-limit backoff that would blow past the client timeout.
+ * It also NEVER throws: on a missing key, rate-limit exhaustion, outage, or bad
+ * output it returns lightly-revised questions so the editor degrades gracefully
+ * instead of surfacing a 500.
  */
 export async function regenerateSectionQuestions(input: SectionEditInput): Promise<EditQuestion[]> {
   if (!env.geminiKey) {
     logger.warn("GEMINI_API_KEY not set — using mock section editor.");
-    return input.questions.map((q) => ({
-      text: `${q.text} (revised)`,
-      difficulty: "moderate" as const,
-      marks: q.marks,
-      options: q.options ?? [],
-      answer: q.options?.length ? q.options[0] : "Updated sample answer.",
-    }));
+    return revisedSectionFallback(input);
   }
 
-  const ai = new GoogleGenAI({ apiKey: env.geminiKey });
-  const { systemInstruction, userPrompt } = buildSectionEditPrompt(input);
-
-  const response = await withRetry("regenerateSection", () =>
-    ai.models.generateContent({
-      model: env.GEMINI_MODEL,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      contents: [{ text: userPrompt }] as any,
-      config: { systemInstruction, responseMimeType: "application/json", temperature: 0.7 },
-    })
-  );
-
-  const cleaned = (response.text ?? "")
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-
-  let json: unknown;
   try {
-    json = JSON.parse(cleaned);
-  } catch {
-    throw ApiError.internal("AI returned invalid JSON while editing the section");
-  }
-  const parsed = sectionEditSchema.safeParse(json);
-  if (!parsed.success) {
-    logger.warn(
-      `section edit validation failed at: ${parsed.error.issues
-        .slice(0, 6)
-        .map((i) => i.path.join("."))
-        .join("; ")}`
+    const ai = new GoogleGenAI({ apiKey: env.geminiKey });
+    const { systemInstruction, userPrompt } = buildSectionEditPrompt(input);
+
+    const response = await withRetry(
+      "regenerateSection",
+      () =>
+        ai.models.generateContent({
+          model: env.GEMINI_MODEL,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          contents: [{ text: userPrompt }] as any,
+          config: { systemInstruction, responseMimeType: "application/json", temperature: 0.7 },
+        }),
+      { maxAttempts: 2, maxDelayMs: 4_000 } // interactive: one quick retry, then give up
     );
-    throw ApiError.internal("AI output failed schema validation while editing the section");
+
+    const cleaned = (response.text ?? "")
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+
+    const json = JSON.parse(cleaned);
+    const parsed = sectionEditSchema.safeParse(json);
+    if (!parsed.success) {
+      logger.warn(
+        `section edit validation failed at: ${parsed.error.issues
+          .slice(0, 6)
+          .map((i) => i.path.join("."))
+          .join("; ")}`
+      );
+      throw new Error("AI output failed schema validation while editing the section");
+    }
+    return parsed.data.questions;
+  } catch (err) {
+    logger.error(
+      `Gemini section regenerate failed — returning revised fallback. ${(err as Error)?.message ?? err}`
+    );
+    return revisedSectionFallback(input);
   }
-  return parsed.data.questions;
 }
